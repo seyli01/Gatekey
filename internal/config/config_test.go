@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -601,5 +602,88 @@ func TestQuotaConfig_PricingFor(t *testing.T) {
 	bare := QuotaConfig{PricingPerMillion: PricingConfig{PromptUSD: 5, CompletionUSD: 7}}
 	if got := bare.PricingFor("gpt-5"); got != bare.PricingPerMillion {
 		t.Errorf("PricingFor with no table = %+v", got)
+	}
+}
+
+// A reference in a comment is documentation, not configuration: it used to fail
+// the load, which is why config.example.yaml could not be loaded as shipped.
+func TestLoad_EnvReferenceInACommentIsIgnored(t *testing.T) {
+	cfg, err := parse([]byte(`
+# Headers support ${ANY_VAR} expansion.
+tokens:
+  signing_key: "0123456789abcdef0123456789abcdef" # or ${GATEKEY_SIGNING_KEY}
+routes:
+  - path_prefix: "/r"
+    target_url: "https://api.example.com"
+`))
+	if err != nil {
+		t.Fatalf("a commented reference failed the load: %v", err)
+	}
+	if cfg.Routes[0].PathPrefix != "/r" {
+		t.Errorf("route %q", cfg.Routes[0].PathPrefix)
+	}
+}
+
+// A secret is inserted as a value. Substituted into the raw text, a quote in it
+// ended the string early and the rest became YAML.
+func TestLoad_EnvValueCannotRewriteTheStructure(t *testing.T) {
+	t.Setenv("TRICKY_KEY", "sk-1\"\n    X-Injected: \"yes")
+	cfg, err := parse([]byte(`
+tokens:
+  signing_key: "0123456789abcdef0123456789abcdef"
+routes:
+  - path_prefix: "/r"
+    target_url: "https://api.example.com"
+    inject_headers:
+      Authorization: "Bearer ${TRICKY_KEY}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := cfg.Routes[0].InjectHeaders
+	if _, injected := headers["X-Injected"]; injected || len(headers) != 1 {
+		t.Fatalf("the value rewrote the configuration: %q", headers)
+	}
+	if got := headers["Authorization"]; got != "Bearer sk-1\"\n    X-Injected: \"yes" {
+		t.Errorf("Authorization = %q, want the secret verbatim", got)
+	}
+}
+
+// An unquoted reference still decodes to the field's type.
+func TestLoad_EnvNumberDecodesAsANumber(t *testing.T) {
+	t.Setenv("MAX_TOKENS", "5000")
+	cfg, err := parse([]byte(`
+tokens:
+  signing_key: "0123456789abcdef0123456789abcdef"
+routes:
+  - path_prefix: "/r"
+    target_url: "https://api.example.com"
+    quota:
+      max_tokens: ${MAX_TOKENS}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Routes[0].Quota.MaxTokens; got != 5000 {
+		t.Errorf("max_tokens = %d, want 5000", got)
+	}
+}
+
+// The shipped example must load once its real variables are set.
+func TestLoad_ExampleConfigLoads(t *testing.T) {
+	data, err := os.ReadFile("../../config.example.yaml")
+	if err != nil {
+		t.Skip("config.example.yaml not found")
+	}
+	// Set every variable the example names, except ENV_VAR: it only ever
+	// appears in a comment, so it must not be required.
+	for _, m := range regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`).FindAllStringSubmatch(string(data), -1) {
+		if m[1] != "ENV_VAR" {
+			t.Setenv(m[1], "0123456789abcdef0123456789abcdef-"+m[1])
+		}
+	}
+
+	if _, err := parse(data); err != nil {
+		t.Fatalf("config.example.yaml does not load: %v", err)
 	}
 }

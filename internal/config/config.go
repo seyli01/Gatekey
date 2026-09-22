@@ -514,17 +514,22 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// expandEnv substitutes ${VAR} and $VAR references from the environment.
+// expandEnv substitutes ${VAR} and $VAR references from the environment, in the
+// values of the parsed document only.
 //
 // Unlike os.ExpandEnv it fails on an undefined variable rather than silently
 // substituting an empty string, which would otherwise ship a broken
 // `Authorization: Bearer ` header upstream and surface as a puzzling 401 from the
 // provider. Write $$ for a literal dollar sign.
-func expandEnv(raw string) (string, error) {
+//
+// Substituting after parsing, rather than in the raw text, is deliberate. A
+// reference inside a comment is left alone, instead of failing the load for a
+// variable nobody uses. And a value is inserted as a value: a secret holding a
+// quote, a colon or a newline can no longer rewrite the structure around it.
+func expandEnv(doc *yaml.Node) error {
 	var missing []string
 	seen := make(map[string]struct{})
-
-	expanded := os.Expand(raw, func(name string) string {
+	lookup := func(name string) string {
 		if name == "$" {
 			return "$"
 		}
@@ -536,25 +541,47 @@ func expandEnv(raw string) (string, error) {
 			missing = append(missing, name)
 		}
 		return ""
-	})
-
-	if len(missing) > 0 {
-		return "", fmt.Errorf("undefined environment variable(s): %s", strings.Join(missing, ", "))
 	}
 
-	return expanded, nil
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n.Kind == yaml.ScalarNode && strings.Contains(n.Value, "$") {
+			n.Value = os.Expand(n.Value, lookup)
+			// The type of an unquoted scalar was guessed from its text before
+			// substitution, "${MAX}" reading as a string. Clearing the tag makes
+			// the decoder guess again from the value, so max_tokens: ${MAX} still
+			// decodes as a number. A quoted scalar stays a string, as written.
+			if n.Style&(yaml.SingleQuotedStyle|yaml.DoubleQuotedStyle) == 0 {
+				n.Tag = ""
+			}
+		}
+		for _, child := range n.Content {
+			walk(child)
+		}
+	}
+	walk(doc)
+
+	if len(missing) > 0 {
+		return fmt.Errorf("undefined environment variable(s): %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
-// parse expands, unmarshals and validates raw YAML configuration bytes.
+// parse unmarshals, expands and validates raw YAML configuration bytes.
 func parse(data []byte) (*Config, error) {
-	expanded, err := expandEnv(string(data))
-	if err != nil {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("parsing YAML config: %w", err)
+	}
+	if err := expandEnv(&doc); err != nil {
 		return nil, err
 	}
 
 	var cfg Config
-	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
-		return nil, fmt.Errorf("parsing YAML config: %w", err)
+	if doc.Kind != 0 { // an empty file decodes to nothing and fails validation below
+		if err := doc.Decode(&cfg); err != nil {
+			return nil, fmt.Errorf("parsing YAML config: %w", err)
+		}
 	}
 
 	if err := cfg.Validate(); err != nil {
