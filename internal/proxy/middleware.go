@@ -20,6 +20,15 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Flush and Unwrap keep streaming alive through this wrapper. Without them the
+// proxy's flushes stopped here, and a streamed answer sat in the server's 4 KB
+// buffer: a short answer arrived all at once, at the very end.
+func (r *statusRecorder) Flush() {
+	_ = http.NewResponseController(r.ResponseWriter).Flush()
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 // RecoveryAndLoggingMiddleware provides:
 // 1. Crash immunization: catches any panic, logs stack trace, returns HTTP 500 JSON.
 // 2. Centralized structured access logging: METHOD, PATH, STATUS, LATENCY, IP.

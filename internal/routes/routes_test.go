@@ -2,6 +2,7 @@ package routes
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -279,5 +280,55 @@ func TestEndpoints_RefreshRejectsBadRequests(t *testing.T) {
 	}
 	if rec := postRefresh(t, router, `{}`, "203.0.113.7:4321"); rec.Code != http.StatusBadRequest {
 		t.Errorf("missing field: status = %d, want 400", rec.Code)
+	}
+}
+
+// A streamed answer must reach the client event by event through the whole
+// router, middleware included. The proxy's own tests bypass the middleware,
+// which is how a wrapper that swallowed every flush went unnoticed: answers sat
+// in a 4 KB buffer until the stream ended.
+func TestEndpoints_StreamingIsNotBufferedByTheMiddleware(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: first\n\n"))
+		w.(http.Flusher).Flush()
+		<-release // the stream stays open until the client has seen the first event
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+	defer close(release)
+
+	cfg := &config.Config{
+		Tokens: config.TokensConfig{SigningKey: "0123456789abcdef0123456789abcdef"},
+		Routes: []config.RouteConfig{{PathPrefix: "/r", TargetURL: upstream.URL}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	issuer := mustIssuer(t, cfg)
+	gateway := proxy.NewGateway(cfg, issuer)
+	t.Cleanup(gateway.Close)
+	server := httptest.NewServer(NewRouter(Options{Gateway: gateway}))
+	defer server.Close()
+
+	pair, err := issuer.Issue("inst", "/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/r/stream", strings.NewReader(`{}`))
+	req.Header.Set("X-App-Token", pair.Access)
+	client := server.Client()
+	client.Timeout = 5 * time.Second
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	want := "data: first\n\n"
+	got := make([]byte, len(want))
+	if _, err := io.ReadFull(resp.Body, got); err != nil || string(got) != want {
+		t.Fatalf("first event %q (err %v): it was held back until the stream ended", got, err)
 	}
 }

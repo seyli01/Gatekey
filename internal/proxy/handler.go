@@ -334,11 +334,16 @@ func (o *responseObserver) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Flush pushes a streamed event to the client at once. It goes through
+// http.ResponseController so that it reaches the connection through any wrapper
+// in between, rather than silently stopping at the first one that does not
+// itself implement http.Flusher.
 func (o *responseObserver) Flush() {
-	if f, ok := o.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	_ = http.NewResponseController(o.ResponseWriter).Flush()
 }
+
+// Unwrap exposes the underlying writer to http.ResponseController.
+func (o *responseObserver) Unwrap() http.ResponseWriter { return o.ResponseWriter }
 
 // ServeHTTP inspects the path, validates the client token, and proxies the request.
 func (gw *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
