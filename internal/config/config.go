@@ -70,8 +70,38 @@ type ServerConfig struct {
 	// override it; "0" disables it.
 	RequestTimeout string `yaml:"request_timeout"`
 
+	// CORSOrigins lists the web origins allowed to call Gatekey from a browser,
+	// e.g. "https://app.example.com" or "tauri://localhost". "*" allows any
+	// origin, which is safe here because the credential travels in a header a
+	// page must set itself, never in a cookie the browser attaches on its own.
+	// Empty, the default, sends no CORS headers at all: native apps and backends
+	// do not need them.
+	CORSOrigins []string `yaml:"cors_origins"`
+
 	ParsedResponseHeaderTimeout time.Duration `yaml:"-"`
 	ParsedRequestTimeout        time.Duration `yaml:"-"`
+
+	// ParsedCORSOrigins holds the normalised origins, "*" included as is.
+	ParsedCORSOrigins map[string]struct{} `yaml:"-"`
+}
+
+// parseOrigin normalises a configured origin to the exact form a browser sends
+// in its Origin header: scheme and host, lower case, with no path.
+func parseOrigin(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "*" {
+		return raw, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("%q is not an origin, want scheme://host[:port]", raw)
+	}
+	// A browser never sends a path, even "/", so an origin carrying one would
+	// silently never match.
+	if u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return "", fmt.Errorf("%q is not an origin: drop everything after the host", raw)
+	}
+	return strings.ToLower(u.Scheme + "://" + u.Host), nil
 }
 
 // StatePath resolves a runtime state file against server.state_dir.
@@ -388,6 +418,18 @@ func (c *Config) Validate() error {
 	case logging.FormatText, logging.FormatJSON:
 	default:
 		return fmt.Errorf("server: unknown log_format %q, want %q or %q", c.Server.LogFormat, logging.FormatText, logging.FormatJSON)
+	}
+
+	c.Server.ParsedCORSOrigins = nil
+	for _, raw := range c.Server.CORSOrigins {
+		origin, err := parseOrigin(raw)
+		if err != nil {
+			return fmt.Errorf("server: cors_origins: %w", err)
+		}
+		if c.Server.ParsedCORSOrigins == nil {
+			c.Server.ParsedCORSOrigins = make(map[string]struct{}, len(c.Server.CORSOrigins))
+		}
+		c.Server.ParsedCORSOrigins[origin] = struct{}{}
 	}
 
 	var err error

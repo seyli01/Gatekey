@@ -283,6 +283,52 @@ func TestEndpoints_RefreshRejectsBadRequests(t *testing.T) {
 	}
 }
 
+// Only the endpoints a client application calls get CORS. On /metrics it would
+// let any page open on the operator's machine read the installs through the
+// browser, which calls from loopback; on /-/reload it would let one trigger it.
+func TestEndpoints_CORSOnlyOnClientEndpoints(t *testing.T) {
+	router, _, _ := setupTestRouter(t, `
+server:
+  cors_origins: ["*"]
+tokens:
+  signing_key: "0123456789abcdef0123456789abcdef"
+routes:
+  - path_prefix: "/dummy"
+    target_url: "http://127.0.0.1:9999"
+`)
+	const origin = "https://page.example"
+
+	for _, tc := range []struct {
+		method, path string
+		wantCORS     bool
+	}{
+		{http.MethodGet, "/metrics", false},
+		{http.MethodOptions, "/metrics", false},
+		{http.MethodPost, "/-/reload", false},
+		{http.MethodOptions, "/-/reload", false},
+		{http.MethodGet, "/healthz", true},
+		{http.MethodOptions, "/-/refresh", true},
+		{http.MethodOptions, "/dummy/v1/chat/completions", true},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req.RemoteAddr = "127.0.0.1:54321"
+		req.Header.Set("Origin", origin)
+		if tc.method == http.MethodOptions {
+			req.Header.Set("Access-Control-Request-Method", "POST")
+		}
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		got := rec.Header().Get("Access-Control-Allow-Origin")
+		if tc.wantCORS && got != origin {
+			t.Errorf("%s %s: Allow-Origin %q, want %q", tc.method, tc.path, got, origin)
+		}
+		if !tc.wantCORS && got != "" {
+			t.Errorf("%s %s: Allow-Origin %q, want none", tc.method, tc.path, got)
+		}
+	}
+}
+
 // A streamed answer must reach the client event by event through the whole
 // router, middleware included. The proxy's own tests bypass the middleware,
 // which is how a wrapper that swallowed every flush went unnoticed: answers sat

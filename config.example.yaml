@@ -20,6 +20,12 @@ server:
   # vers le seul volume inscriptible. Lu au demarrage, pas au reload.
   # state_dir: "/var/lib/gatekey"
 
+  # Origines web autorisees a appeler Gatekey depuis un navigateur (app web,
+  # Tauri). Vide par defaut = aucun en-tete CORS : inutile pour une app native
+  # ou un backend. "*" autorise toute origine. Jamais applique a /metrics ni
+  # /-/reload. Applique au reload.
+  # cors_origins: ["https://app.example.com", "tauri://localhost"]
+
 # ==============================================================================
 # Tokens (obligatoire)
 # ==============================================================================

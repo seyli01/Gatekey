@@ -49,6 +49,7 @@ type Gateway struct {
 	mu              sync.RWMutex
 	authHeader      string
 	maxBodyBytes    int64
+	cors            *corsPolicy
 	routes          []routeEntry
 	issuer          *token.Issuer
 	credentials     map[string]credential.Source
@@ -176,6 +177,7 @@ func (gw *Gateway) updateRoutes(cfg *config.Config) {
 	// would race with the next reload. Capturing also pins the header a request
 	// was authenticated with, instead of whatever a concurrent reload installed.
 	authHeader := gw.authHeader
+	gw.cors = newCORSPolicy(cfg.Server.ParsedCORSOrigins)
 
 	if gw.credentials == nil {
 		gw.credentials = make(map[string]credential.Source)
@@ -224,8 +226,9 @@ func (gw *Gateway) updateRoutes(cfg *config.Config) {
 
 		// Configure httputil.ReverseProxy with zero-buffer streaming (SSE friendly)
 		proxy := &httputil.ReverseProxy{
-			Transport:     gw.transport,
-			FlushInterval: -1, // -1 means flush immediately after each write to client
+			Transport:      gw.transport,
+			FlushInterval:  -1, // -1 means flush immediately after each write to client
+			ModifyResponse: stripUpstreamCORS,
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				// Initialize outbound request targeting remote host
 				pr.SetURL(target)

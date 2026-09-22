@@ -605,6 +605,55 @@ func TestQuotaConfig_PricingFor(t *testing.T) {
 	}
 }
 
+// Origins are stored the way a browser sends them. Anything else would be
+// accepted and then silently never match.
+func TestServer_CORSOrigins(t *testing.T) {
+	valid := map[string]string{
+		"https://app.example.com":   "https://app.example.com",
+		" HTTPS://App.Example.com ": "https://app.example.com",
+		"http://localhost:5173":     "http://localhost:5173",
+		"tauri://localhost":         "tauri://localhost",
+		"*":                         "*",
+	}
+	for raw, want := range valid {
+		cfg := corsConfig(raw)
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("%q rejected: %v", raw, err)
+			continue
+		}
+		if _, ok := cfg.Server.ParsedCORSOrigins[want]; !ok || len(cfg.Server.ParsedCORSOrigins) != 1 {
+			t.Errorf("%q parsed to %v, want {%q}", raw, cfg.Server.ParsedCORSOrigins, want)
+		}
+	}
+
+	for _, raw := range []string{
+		"app.example.com",          // no scheme
+		"https://app.example.com/", // a browser never sends the slash
+		"https://app.example.com/app",
+		"https://app.example.com?x=1",
+		"https://user@app.example.com",
+		"",
+	} {
+		cfg := corsConfig(raw)
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "cors_origins") {
+			t.Errorf("%q: got %v, want a cors_origins error", raw, err)
+		}
+	}
+
+	cfg := corsConfig()
+	if err := cfg.Validate(); err != nil || cfg.Server.ParsedCORSOrigins != nil {
+		t.Errorf("no cors_origins must mean CORS off, got %v (err %v)", cfg.Server.ParsedCORSOrigins, err)
+	}
+}
+
+func corsConfig(origins ...string) Config {
+	return Config{
+		Server: ServerConfig{CORSOrigins: origins},
+		Tokens: TokensConfig{SigningKey: "0123456789abcdef0123456789abcdef"},
+		Routes: []RouteConfig{{PathPrefix: "/r", TargetURL: "https://api.example.com"}},
+	}
+}
+
 // A reference in a comment is documentation, not configuration: it used to fail
 // the load, which is why config.example.yaml could not be loaded as shipped.
 func TestLoad_EnvReferenceInACommentIsIgnored(t *testing.T) {

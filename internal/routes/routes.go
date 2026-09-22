@@ -28,8 +28,13 @@ type Options struct {
 func NewRouter(opts Options) http.Handler {
 	mux := http.NewServeMux()
 
-	// 1. Healthcheck endpoint
-	mux.HandleFunc("/healthz", HealthzHandler())
+	// 1. Healthcheck endpoint. It says nothing but "up", so a web client may
+	// read it too, to show whether the proxy is reachable.
+	if opts.Gateway != nil {
+		mux.Handle("/healthz", opts.Gateway.CORS(HealthzHandler()))
+	} else {
+		mux.HandleFunc("/healthz", HealthzHandler())
+	}
 
 	// 2. Metrics telemetry endpoint (strictly restricted to loopback)
 	if opts.Collector != nil {
@@ -41,14 +46,11 @@ func NewRouter(opts Options) http.Handler {
 		mux.HandleFunc("/-/reload", loopbackOnly("/-/reload", ReloadHandler(opts.ConfigMgr)))
 	}
 
-	// 4. Public token refresh endpoint
+	// 4. Public token refresh endpoint, and 5. the reverse proxy itself. These
+	// are the two a client application calls, so they alone get CORS.
 	if opts.Gateway != nil {
-		mux.HandleFunc("/-/refresh", RefreshHandler(opts.Gateway.Issuer))
-	}
-
-	// 5. Reverse Proxy Gateway
-	if opts.Gateway != nil {
-		mux.HandleFunc("/", opts.Gateway.ServeHTTP)
+		mux.Handle("/-/refresh", opts.Gateway.CORS(RefreshHandler(opts.Gateway.Issuer)))
+		mux.Handle("/", opts.Gateway.CORS(opts.Gateway))
 	}
 
 	return proxy.RecoveryAndLoggingMiddleware(mux)
