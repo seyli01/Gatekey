@@ -2,12 +2,14 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1529,4 +1531,52 @@ func TestProxy_TotalQuotaAcrossInstalls(t *testing.T) {
 			t.Errorf("header %s exposed on a route with no per-install limit", name)
 		}
 	}
+}
+
+// Responses larger than the copy buffer, and many at once sharing the pool,
+// must still arrive byte for byte.
+func TestProxy_LargeResponsesSurviveTheSmallCopyBuffer(t *testing.T) {
+	payload := make([]byte, 5<<20+123) // several hundred buffers' worth, not a multiple
+	for i := range payload {
+		payload[i] = byte(i * 7)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		Tokens: config.TokensConfig{SigningKey: "0123456789abcdef0123456789abcdef"},
+		Routes: []config.RouteConfig{{PathPrefix: "/r", TargetURL: upstream.URL}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	issuer := mustIssuer(t, cfg)
+	gw := NewGateway(cfg, issuer)
+	defer gw.Close()
+	server := httptest.NewServer(gw)
+	defer server.Close()
+	tok := mustToken(t, issuer, "inst", "/r")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, _ := http.NewRequest(http.MethodGet, server.URL+"/r/file", nil)
+			req.Header.Set("X-App-Token", tok)
+			resp, err := server.Client().Do(req)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer resp.Body.Close()
+			got, err := io.ReadAll(resp.Body)
+			if err != nil || !bytes.Equal(got, payload) {
+				t.Errorf("got %d bytes (err %v), want %d identical bytes", len(got), err, len(payload))
+			}
+		}()
+	}
+	wg.Wait()
 }

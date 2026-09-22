@@ -29,6 +29,26 @@ import (
 // the Rewrite closure, which runs too late to fail a request cleanly.
 type credentialHeaderKey struct{}
 
+// copyBufferSize is the buffer each in-flight response is copied through.
+//
+// httputil.ReverseProxy allocates 32 KB per response by default, and holds it for
+// as long as the response lasts. Profiling 5,000 concurrent streams put that
+// buffer first, at 30% of Gatekey's memory, while the events it relayed were a
+// hundred bytes each. 8 KB still moves a large JSON or file answer in few
+// writes, and costs a quarter of the memory per stream.
+const copyBufferSize = 8 << 10
+
+// copyBuffers recycles those buffers across responses and routes.
+var copyBuffers = &bufferPool{pool: sync.Pool{New: func() any {
+	b := make([]byte, copyBufferSize)
+	return &b
+}}}
+
+type bufferPool struct{ pool sync.Pool }
+
+func (p *bufferPool) Get() []byte  { return *p.pool.Get().(*[]byte) }
+func (p *bufferPool) Put(b []byte) { p.pool.Put(&b) }
+
 // routeEntry represents a compiled routing rule and its dedicated reverse proxy.
 type routeEntry struct {
 	pathPrefix    string
@@ -229,6 +249,7 @@ func (gw *Gateway) updateRoutes(cfg *config.Config) {
 			Transport:      gw.transport,
 			FlushInterval:  -1, // -1 means flush immediately after each write to client
 			ModifyResponse: stripUpstreamCORS,
+			BufferPool:     copyBuffers,
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				// Initialize outbound request targeting remote host
 				pr.SetURL(target)
