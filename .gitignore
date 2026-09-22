@@ -1,0 +1,24 @@
+# Compiled binaries
+/gatekey
+/loadtest
+
+# Local configuration: holds provider API keys
+config.yaml
+
+# Runtime state: usage counters, and rotated provider refresh tokens.
+# All three name installations and spend.
+quotas.json
+quotas.json.log
+metrics.json
+credentials.json
+
+# Local test page: holds issued client tokens
+test/chat.html
+
+# Profiles
+*.pb.gz
+
+# OS noise
+.DS_Store
+Thumbs.db
+*.tmp
