@@ -1,0 +1,103 @@
+# ==============================================================================
+# Gatekey - Micro Reverse-Proxy HTTP & API Key Guard Configuration
+# ==============================================================================
+
+server:
+  # Adresse et port d'écoute du serveur Gatekey
+  listen: ":8080"
+  
+  # Nom de l'en-tête HTTP dans lequel le client externe doit transmettre son token.
+  # Défaut : "X-App-Token".
+  auth_header: "X-App-Token"
+
+  # Taille maximale autorisée pour le corps de requête en Mo (protection anti-DoS).
+  # Défaut : 50 Mo (adapté pour les images GPT-4o Vision et l'audio Whisper).
+  max_body_size_mb: 50
+
+  # Repertoire ou sont ecrits quotas.json et metrics.json.
+  # Par defaut le repertoire de lancement, ce qui echoue sur un systeme de
+  # fichiers en lecture seule (image scratch, conteneur durci) : pointez-le alors
+  # vers le seul volume inscriptible. Lu au demarrage, pas au reload.
+  # state_dir: "/var/lib/gatekey"
+
+# ==============================================================================
+# Tokens (obligatoire)
+# ==============================================================================
+# C'est l'unique mecanisme d'authentification des clients. Les tokens sont
+# signes, a duree de vie limitee, emis par "gatekey issue" et renouveles sur
+# POST /-/refresh. Rien n'est stocke : seule la denylist est persistee.
+#
+# Deux tokens, deux roles :
+#   - access token  : envoye a chaque requete proxifiee, donc expose partout,
+#                     donc a duree de vie courte (15 min par defaut) ;
+#   - refresh token : presente uniquement a /-/refresh, garde dans le trousseau
+#                     de l'OS, donc a duree de vie longue (30 jours par defaut).
+#
+# Les quotas et le rate limit s'indexent sur l'install_id du token, pas sur sa
+# valeur : un renouvellement ne remet donc jamais un budget a zero.
+#
+# Un appelant incapable de rafraichir (cron, worker) prend un token a longue
+# duree de vie -- il reste revocable et nomme, contrairement a une constante
+# ecrite a la main :
+#   gatekey issue -install cron-backend -route /openai -ttl 87600h
+#
+tokens:
+  # Genere avec "gatekey genkey". La faire tourner invalide tous les tokens
+  # deja emis. Ne la mettez jamais en clair dans ce fichier.
+  signing_key: "${GATEKEY_SIGNING_KEY}"
+  access_ttl: "15m"
+  refresh_ttl: "720h"
+  # Revocation immediate : l'install perd ses deux tokens au prochain reload.
+  denylist:
+    - "install-telephone-perdu"
+
+routes:
+  # ----------------------------------------------------------------------------
+  # Exemple 1 : Relais OpenAI avec injection de Bearer Token
+  # ----------------------------------------------------------------------------
+  - path_prefix: "/openai"
+    target_url: "https://api.openai.com"
+    # strip_prefix: true (défaut) réécrit "/openai/v1/chat/completions" en "/v1/chat/completions"
+    strip_prefix: true
+    # Limitation de débit par token client (Token Bucket en mémoire vive)
+    rate_limit:
+      requests_per_minute: 60   # Nombre moyen de requêtes autorisées par minute (0 = illimité)
+      burst: 10                 # Capacité maximale de rafale (défaut : max(1, rpm/6))
+    # Quotas et Budgets (Tokens LLM & Plafond USD avec persistance sur disque)
+    quota:
+      max_tokens: 1000000       # Plafond de tokens LLM consommés (Prompt + Completion, 0 = illimité)
+      max_budget_usd: 50.00     # Plafond de budget en USD (ex: coupe si >= 50 $, 0 = illimité)
+      # Plafonds de la route entière, toutes installations confondues. Une requête
+      # doit tenir dans les deux : son quota d'installation et le total.
+      total_budget_usd: 500.00  # 0 = illimité
+      # total_max_tokens: 50000000
+      pricing_per_million:
+        prompt_usd: 2.50        # Coût en $ pour 1 Million de tokens d'entrée (Prompt)
+        completion_usd: 10.00   # Coût en $ pour 1 Million de tokens de sortie (Completion)
+    # NOTE : l'application est souple. L'usage n'est connu qu'après la réponse du
+    # modèle, donc des requêtes concurrentes peuvent dépasser le plafond d'un lot.
+    # Dimensionnez ces valeurs comme un disjoncteur, avec de la marge.
+    # En-têtes injectés vers l'API amont (supporte l'expansion ${ENV_VAR}).
+    # Une variable non définie fait échouer le chargement ; utilisez $$ pour un
+    # dollar littéral.
+    inject_headers:
+      Authorization: "Bearer ${OPENAI_API_KEY}"
+
+  # ----------------------------------------------------------------------------
+  # Exemple 2 : Relais Anthropic avec injection de l'en-tête x-api-key
+  # ----------------------------------------------------------------------------
+  - path_prefix: "/anthropic"
+    target_url: "https://api.anthropic.com"
+    strip_prefix: true
+    inject_headers:
+      x-api-key: "${ANTHROPIC_API_KEY}"
+      anthropic-version: "2023-06-01"
+
+  # ----------------------------------------------------------------------------
+  # Exemple 3 : Relais vers un LLM Local (vLLM / Ollama) sans modification de chemin
+  # ----------------------------------------------------------------------------
+  - path_prefix: "/vllm"
+    target_url: "http://127.0.0.1:8000"
+    strip_prefix: false
+    inject_headers:
+      Authorization: "Bearer internal-cluster-secret"
